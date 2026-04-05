@@ -3,7 +3,6 @@ import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
 
 export async function POST(req: NextRequest) {
-  let logDetails = "";
   try {
     const body = await req.json();
     const { name, email, company, message } = body;
@@ -47,22 +46,15 @@ export async function POST(req: NextRequest) {
     // --- Action 2: Google Sheets Logging ---
     if (serviceAccountEmail && privateKey && sheetId) {
       try {
-        // V15.5: EXTREME ROBUST PRIVATE KEY PARSING
-        // 1. Remove quotes if any
+        // V15.5 FINAL: EXTREME ROBUST PRIVATE KEY PARSING
         let cleanKey = privateKey.trim();
         if (cleanKey.startsWith('"') && cleanKey.endsWith('"')) {
           cleanKey = cleanKey.slice(1, -1);
         }
         
-        // 2. Fix Double Escaping (common in Vercel)
-        // Convert literal "\n" strings to actual newline characters
-        cleanKey = cleanKey.replace(/\\n/gm, "\n");
+        // Convert both "\\n" string literals and raw "\n" to actual newlines
+        cleanKey = cleanKey.replace(/\\n/g, "\n");
         
-        // 3. Ensure the header and footer are clean
-        if (!cleanKey.includes("-----BEGIN PRIVATE KEY-----")) {
-           throw new Error("Missing BEGIN PRIVATE KEY header");
-        }
-
         const jwt = new JWT({
           email: serviceAccountEmail,
           key: cleanKey,
@@ -85,14 +77,14 @@ export async function POST(req: NextRequest) {
       } catch (sheetErr: any) {
         console.error("Google Sheets Final Error:", sheetErr.message);
         
-        // Send actual error back to Telegram for debugging
+        // Notify user via Telegram about WHICH error happened
         if (telegramToken && telegramChatId) {
           await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: telegramChatId,
-              text: `❌ *Sheet Auth Failed:*\n\`${sheetErr.message}\`\n\n_Tip: Please ensure Vercel Private Key includes newlines correctly._`,
+              text: `❌ *Sheet Error:* ${sheetErr.message}\nCheck if you shared the sheet with the Service Account email.`,
               parse_mode: "Markdown",
             }),
           });
