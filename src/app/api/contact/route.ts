@@ -21,15 +21,6 @@ export async function POST(req: NextRequest) {
     const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
     const telegramChatId = process.env.TELEGRAM_CHAT_ID;
 
-    // Normalize Private Key (Handle different Vercel formats)
-    if (privateKey) {
-      privateKey = privateKey.replace(/\\n/g, "\n");
-      // Safety check for quotes
-      if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
-        privateKey = privateKey.slice(1, -1);
-      }
-    }
-
     // --- Action 1: Telegram Notification ---
     let telegramMessage = `🚀 *New Lead from STRATA*\n\n` +
                           `👤 *Name:* ${name}\n` +
@@ -49,28 +40,39 @@ export async function POST(req: NextRequest) {
           }),
         });
       } catch (telErr: any) {
-        console.error("Telegram Notification Error:", telErr);
-        logDetails += ` [Telegram Error: ${telErr.message}]`;
+        console.error("Telegram Error:", telErr.message);
       }
     }
 
     // --- Action 2: Google Sheets Logging ---
     if (serviceAccountEmail && privateKey && sheetId) {
       try {
-        console.log("Attempting Google Sheets Auth with:", serviceAccountEmail);
-        const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
+        // V15.5: EXTREME ROBUST PRIVATE KEY PARSING
+        // 1. Remove quotes if any
+        let cleanKey = privateKey.trim();
+        if (cleanKey.startsWith('"') && cleanKey.endsWith('"')) {
+          cleanKey = cleanKey.slice(1, -1);
+        }
+        
+        // 2. Fix Double Escaping (common in Vercel)
+        // Convert literal "\n" strings to actual newline characters
+        cleanKey = cleanKey.replace(/\\n/gm, "\n");
+        
+        // 3. Ensure the header and footer are clean
+        if (!cleanKey.includes("-----BEGIN PRIVATE KEY-----")) {
+           throw new Error("Missing BEGIN PRIVATE KEY header");
+        }
+
         const jwt = new JWT({
           email: serviceAccountEmail,
-          key: privateKey,
-          scopes: SCOPES,
+          key: cleanKey,
+          scopes: ["https://www.googleapis.com/auth/spreadsheets"],
         });
 
         const doc = new GoogleSpreadsheet(sheetId, jwt);
         await doc.loadInfo();
 
         const sheet = doc.sheetsByIndex[0];
-        
-        // Use column headers mapping
         await sheet.addRow({
           Date: new Date().toLocaleString("en-US", { timeZone: "UTC" }),
           Name: name,
@@ -81,32 +83,26 @@ export async function POST(req: NextRequest) {
         
         console.log("Successfully logged to Google Sheets");
       } catch (sheetErr: any) {
-        console.error("Google Sheets Error:", sheetErr.message);
-        logDetails += ` [Sheet Error: ${sheetErr.message}]`;
+        console.error("Google Sheets Final Error:", sheetErr.message);
         
-        // Notify via Telegram if sheet failed so you know WHY
+        // Send actual error back to Telegram for debugging
         if (telegramToken && telegramChatId) {
-          try {
-            await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                chat_id: telegramChatId,
-                text: `❌ *Google Sheets Error:* ${sheetErr.message}\nCheck if you shared the sheet with \`${serviceAccountEmail}\`.`,
-                parse_mode: "Markdown",
-              }),
-            });
-          } catch (tErr) {}
+          await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: telegramChatId,
+              text: `❌ *Sheet Auth Failed:*\n\`${sheetErr.message}\`\n\n_Tip: Please ensure Vercel Private Key includes newlines correctly._`,
+              parse_mode: "Markdown",
+            }),
+          });
         }
       }
-    } else {
-      console.warn("One or more Google Sheets env vars are missing.");
-      logDetails += " [Missing Google Env Vars]";
     }
 
-    return NextResponse.json({ message: "Processed", details: logDetails }, { status: 201 });
+    return NextResponse.json({ message: "Processed" }, { status: 201 });
   } catch (error: any) {
-    console.error("Full API Error:", error);
+    console.error("Critical API Error:", error);
     return NextResponse.json({ error: "Internal Server Error", details: error.message }, { status: 500 });
   }
 }
