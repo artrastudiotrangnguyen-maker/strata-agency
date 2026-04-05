@@ -14,13 +14,23 @@ export async function POST(req: NextRequest) {
 
     // --- Environment Variables ---
     const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-    const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+    let privateKey = process.env.GOOGLE_PRIVATE_KEY;
     const sheetId = process.env.GOOGLE_SHEET_ID;
     
     const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
     const telegramChatId = process.env.TELEGRAM_CHAT_ID;
 
-    // --- Action 1: Telegram Notification (V15) ---
+    // Normalize Private Key (Handle different Vercel formats)
+    if (privateKey) {
+      // Replace literal \n string with real newline characters
+      privateKey = privateKey.replace(/\\n/g, "\n");
+      // If it has escaped quotes, remove them
+      if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+        privateKey = privateKey.slice(1, -1);
+      }
+    }
+
+    // --- Action 1: Telegram Notification ---
     if (telegramToken && telegramChatId) {
       try {
         const text = `🚀 *New Lead from STRATA*\n\n` +
@@ -40,46 +50,45 @@ export async function POST(req: NextRequest) {
         });
       } catch (telErr) {
         console.error("Telegram Notification Error:", telErr);
-        // We continue anyway to log to Sheets
       }
-    } else {
-      console.warn("Telegram credentials not set. Skipping notification.");
     }
 
     // --- Action 2: Google Sheets Logging ---
     if (serviceAccountEmail && privateKey && sheetId) {
-      const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
-      const jwt = new JWT({
-        email: serviceAccountEmail,
-        key: privateKey,
-        scopes: SCOPES,
-      });
+      try {
+        const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
+        const jwt = new JWT({
+          email: serviceAccountEmail,
+          key: privateKey,
+          scopes: SCOPES,
+        });
 
-      const doc = new GoogleSpreadsheet(sheetId, jwt);
-      await doc.loadInfo();
+        const doc = new GoogleSpreadsheet(sheetId, jwt);
+        await doc.loadInfo();
 
-      const sheet = doc.sheetsByIndex[0];
-      await sheet.addRow({
-        Date: new Date().toLocaleString("en-US", { timeZone: "UTC" }),
-        Name: name,
-        Email: email,
-        Company: company || "N/A",
-        Message: message,
-      });
-    } else {
-      console.warn("Google Sheets credentials not set. Logging data instead:", body);
-      // In demo/dev mode without keys, we still want to show success in UI
-      if (!telegramToken) {
-        return NextResponse.json({ 
-          message: "Demo Mode: Data received but no external integrations configured.",
-          data: body 
-        }, { status: 200 });
+        const sheet = doc.sheetsByIndex[0];
+        
+        // Add row with specific mapping
+        await sheet.addRow({
+          Date: new Date().toLocaleString("en-US", { timeZone: "UTC" }),
+          Name: name,
+          Email: email,
+          Company: company || "N/A",
+          Message: message,
+        });
+        
+        console.log("Successfully logged to Google Sheets");
+      } catch (sheetErr: any) {
+        console.error("Google Sheets Authorization/Write Error:", sheetErr.message);
+        // We log the error but don't fail the whole request because Telegram might have worked
       }
+    } else {
+      console.warn("Google Sheets credentials incomplete. Sheet logging skipped.");
     }
 
     return NextResponse.json({ message: "Success" }, { status: 201 });
   } catch (error: any) {
-    console.error("API Error:", error);
+    console.error("Full API Error:", error);
     return NextResponse.json({ error: "Internal Server Error", details: error.message }, { status: 500 });
   }
 }
