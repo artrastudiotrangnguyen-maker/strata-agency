@@ -7,12 +7,10 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { name, email, company, message } = body;
 
-    // Validate inputs
     if (!name || !email || !message) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
-    // --- Environment Variables ---
     const serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
     let privateKey = process.env.GOOGLE_PRIVATE_KEY;
     const sheetId = process.env.GOOGLE_SHEET_ID;
@@ -20,44 +18,52 @@ export async function POST(req: NextRequest) {
     const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
     const telegramChatId = process.env.TELEGRAM_CHAT_ID;
 
-    // --- Action 1: Telegram Notification ---
-    let telegramMessage = `🚀 *New Lead from STRATA*\n\n` +
-                          `👤 *Name:* ${name}\n` +
-                          `📧 *Email:* ${email}\n` +
-                          `🏢 *Company:* ${company || "N/A"}\n\n` +
-                          `💬 *Message:* \n${message}`;
-
+    // --- Telegram Notification ---
     if (telegramToken && telegramChatId) {
+      const text = `🚀 *New Lead from STRATA*\n\n` +
+                   `👤 *Name:* ${name}\n` +
+                   `📧 *Email:* ${email}\n` +
+                   `🏢 *Company:* ${company || "N/A"}\n\n` +
+                   `💬 *Message:* \n${message}`;
+
       try {
         await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: telegramChatId,
-            text: telegramMessage,
-            parse_mode: "Markdown",
-          }),
+          body: JSON.stringify({ chat_id: telegramChatId, text: text, parse_mode: "Markdown" }),
         });
-      } catch (telErr: any) {
-        console.error("Telegram Error:", telErr.message);
-      }
+      } catch (e) {}
     }
 
-    // --- Action 2: Google Sheets Logging ---
+    // --- Google Sheets Logging (V15.6 - Ultimate Key Reconstruction) ---
     if (serviceAccountEmail && privateKey && sheetId) {
       try {
-        // V15.5 FINAL: EXTREME ROBUST PRIVATE KEY PARSING
-        let cleanKey = privateKey.trim();
-        if (cleanKey.startsWith('"') && cleanKey.endsWith('"')) {
-          cleanKey = cleanKey.slice(1, -1);
-        }
+        // 1. Defensively clean the key string
+        let rawKey = privateKey.trim();
         
-        // Convert both "\\n" string literals and raw "\n" to actual newlines
-        cleanKey = cleanKey.replace(/\\n/g, "\n");
+        // Remove literal quotes if they exist
+        if (rawKey.startsWith('"')) rawKey = rawKey.substring(1);
+        if (rawKey.endsWith('"')) rawKey = rawKey.substring(0, rawKey.length - 1);
         
+        // Handle escaped newlines
+        rawKey = rawKey.replace(/\\n/g, "\n");
+
+        // 2. RECONSTRUCTION: Extract only the base64 content and re-wrap it properly
+        const header = "-----BEGIN PRIVATE KEY-----";
+        const footer = "-----END PRIVATE KEY-----";
+        
+        let content = rawKey
+          .replace(header, "")
+          .replace(footer, "")
+          .replace(/\s/g, ""); // Remove ALL whitespace, newlines, etc.
+        
+        // Re-wrap content every 64 characters (standard PEM format)
+        const wrappedContent = content.match(/.{1,64}/g)?.join("\n") || content;
+        const finalizedKey = `${header}\n${wrappedContent}\n${footer}\n`;
+
         const jwt = new JWT({
           email: serviceAccountEmail,
-          key: cleanKey,
+          key: finalizedKey,
           scopes: ["https://www.googleapis.com/auth/spreadsheets"],
         });
 
@@ -73,18 +79,16 @@ export async function POST(req: NextRequest) {
           Message: message,
         });
         
-        console.log("Successfully logged to Google Sheets");
+        console.log("Logged to Sheets with reconstructed key.");
       } catch (sheetErr: any) {
-        console.error("Google Sheets Final Error:", sheetErr.message);
-        
-        // Notify user via Telegram about WHICH error happened
+        console.error("Sheets Final Error:", sheetErr.message);
         if (telegramToken && telegramChatId) {
           await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: telegramChatId,
-              text: `❌ *Sheet Error:* ${sheetErr.message}\nCheck if you shared the sheet with the Service Account email.`,
+              text: `❌ *Sheet Auth Failed (V15.6):*\n\`${sheetErr.message}\`\n\n_If it still says DECODER unsupported, verify you copied the entire key correctly from the file._`,
               parse_mode: "Markdown",
             }),
           });
@@ -94,7 +98,6 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ message: "Processed" }, { status: 201 });
   } catch (error: any) {
-    console.error("Critical API Error:", error);
-    return NextResponse.json({ error: "Internal Server Error", details: error.message }, { status: 500 });
+    return NextResponse.json({ error: "Server Error", details: error.message }, { status: 500 });
   }
 }
